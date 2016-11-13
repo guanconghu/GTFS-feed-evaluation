@@ -1,0 +1,178 @@
+import os
+import pandas as pd
+
+apath = os.path.dirname(os.path.realpath(__file__))
+
+trippath = "{}/trips.txt".format(apath)
+stoptimespath = "{}/stop_times.txt".format(apath)
+stopspath = "{}/stops.txt".format(apath)
+routespath = "{}/routes.txt".format(apath)
+
+# import the dataframe
+trips = pd.read_csv(trippath, sep = ",")
+stoptimes = pd.read_csv(stoptimespath, sep = ",")
+stops = pd.read_csv(stopspath, sep = ",")
+routes = pd.read_csv(routespath, sep = ",")
+
+#output
+writer = pd.ExcelWriter('eval.xlsx', engine='xlsxwriter')
+
+#set format
+workbook  = writer.book
+worksheet1= workbook.add_worksheet('direction')
+worksheet1.write('A1', 'The missing percentage of direction id is')
+cell1_fmt = workbook.add_format({'align':'center','bold':True})
+worksheet1.set_column('A:A',35,cell1_fmt)
+
+worksheet2= workbook.add_worksheet('headsign')
+worksheet2.write('A1', 'The missing percentage of headsign is')
+worksheet2.set_column('A:A',35,cell1_fmt)
+
+if 'direction_id' in trips:
+    directionid = trips['direction_id']
+    l1 = len(directionid)
+    # get the length of the data without nan
+    direction = directionid.dropna()
+    ll1 = len(direction)
+    # get the percentage of missing values
+    p1 = (l1- ll1)/l1 
+    p1 = format(p1,'.2%')  
+    worksheet1.write('A2', p1)
+else:
+    worksheet1.write('A2', '100%')
+    trips['direction_id'] = 2  
+
+if 'trip_headsign' in trips:
+    headid = trips['trip_headsign']
+    l2 =len(headid)
+    head = headid.dropna()
+    ll2 = len(head)    
+    p2 = (l2- ll2)/l2 
+    p2 = format(p2,'.2%') 
+    worksheet2.write('A2', p2)
+else:
+    worksheet2.write('A2', '100%') 
+    
+# Stop aggregation
+# find out how many routes each stop servces
+# merge the two dataframe
+
+df1 = pd.merge(stoptimes, trips, how='left', on='trip_id', sort=True,  
+        suffixes=('_x', '_y'), copy=True, indicator=False)        
+print df1[0:6]
+
+# get rid of duplicates in the dataframe  
+df2 = df1.drop_duplicates(subset=['stop_id', 'route_id','direction_id'])
+print df2[0:6]
+
+df2 = df2[['stop_id','route_id','direction_id']]
+
+dff2 = pd.merge(df2, stops, how='left', on='stop_id', sort=True,  
+        suffixes=('_x', '_y'), copy=True, indicator=False)  
+
+'''
+if there are location_type in the stops.txt, get ride of the stations and 
+entraces when doing stop investigation
+'''
+
+if 'location_type' in stops:
+    dff2 = dff2[dff2.location_type<1]
+else:
+    print ("no location type in the feed")
+
+df2 = dff2[['stop_id','route_id','direction_id','stop_lat','stop_lon']]    
+# only consider bus stops when doing stop investigation
+df3 = pd.merge(df2, routes, how='left', on='route_id', sort=True,  
+        suffixes=('_x', '_y'), copy=True, indicator=False)  
+print df3[0:6]
+print len(df3)
+
+df3 = df3[df3.route_type == 3]
+df3 = df3[['stop_id','route_id','direction_id','route_short_name','route_type','stop_lat','stop_lon']]
+df4 = df3.drop_duplicates(subset=['stop_id', 'route_id','direction_id'])
+print df4[0:6]
+
+# group the dataframe first only by stop_id
+grouped = df4.groupby('stop_id').agg({'route_id':pd.Series.nunique})
+print grouped[0:6]
+grouped.columns = ['route_amount']
+# when there are more than 10 routes go to the stop, the stop is very likely being aggregated
+route = grouped[grouped['route_amount']>=10]
+print route[0:6]
+
+# sort the df by how many routes under each stop
+routedf = route.sort_values('route_amount', ascending= False)
+
+# when one stop serves both direction trips of the same route, the stop is very likely aggregated
+grouped2 = df4.groupby(['stop_id','route_id','route_short_name']).agg({'direction_id':pd.Series.nunique})
+print grouped2[0:6]
+routedf2 = grouped2[grouped2['direction_id']>=2]
+routedf2.columns=['direction_amount']
+
+#output
+cell2_fmt = workbook.add_format({'align':'center','valign':'vcenter','center_across':True,'border':True,'border_color':'black','bold':True})
+routedf.to_excel(writer, 'stop_aggregation')
+worksheet3 = writer.sheets['stop_aggregation']
+worksheet3.set_column('A:B',20,cell2_fmt)
+
+routedf2.to_excel(writer,'stop_two_dirid')
+worksheet4 = writer.sheets['stop_two_dirid']
+worksheet4.set_column('A:D',20,cell2_fmt)
+
+# stop underaggregation and do not consider train stops
+stops1 = df4[['stop_id','stop_lat','stop_lon']]
+stops1 = stops1.drop_duplicates(subset=['stop_id'])
+stops1 = stops1.sort_values(['stop_lat', 'stop_lon'], ascending= True)
+stops1 = stops1.reset_index()
+print stops1[0:10]
+
+#define variables
+stopid = stops1['stop_id']
+lat = stops1['stop_lat']
+lon = stops1['stop_lon']
+
+stopid1 = []
+stopid2 = []
+distance = []
+x = 0
+print len(lat)
+      
+#search for the potential under-aggregated stops
+for i in range(0, len(lat)-2):
+    j = 1
+    while ((i + j ) <= (len(lat))-1) & (abs(lat[i+j] - lat[i]) <= 0.0001): 
+        if  abs(lon[i+j] - lon[i]) <= 0.0001:
+            stopid1.append([]) 
+            stopid2.append([])
+            distance.append([])
+            stopid1[x] = stopid[i]
+            stopid2[x] = stopid[i+j]
+            distance[x] = abs(lat[i] - lat [i+j]) + abs(lon[i] - lon[i+j])                
+            x += 1                 
+            j += 1              
+        else:
+            j += 1
+            
+print type(stopid1) 
+print distance[0:6]
+
+#combine the variables as a df
+dfstop = pd.DataFrame(stopid1)
+dfstop['the_second_stop_id'] = stopid2
+dfstop['distance'] = distance 
+dfstop.columns = 'the_first_stop_id', 'the_second_stop_id', 'distance' ## Mark: This should be a list [] or tuple () I think 
+
+#sort the df by the distance
+dfstop1 = dfstop.sort_values('distance', ascending= True)
+
+#print type(dfstop1)
+#print dfstop1[0:6]
+
+#sometimes the file is too big, so just output the first 50 will be good enough
+#dfstop1 = dfstop1[0:50]
+dfstop1.to_excel(writer,sheet_name='stop_under_aggregation')
+worksheet5 = writer.sheets['stop_under_aggregation']
+worksheet5.set_column('A:D',20,cell2_fmt)
+
+workbook.close()
+writer.save()
